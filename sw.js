@@ -1,13 +1,5 @@
-{
-  "name": "My Open Brain",
-  "short_name": "Open Brain",
-  "start_url": "./",
-  "scope": "./",
-  "display": "standalone",
-  "background_color": "#0f0f0f",
-  "theme_color": "#6366f1",
-  "icons": [
-    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
-    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
-  ]
-}
+self.addEventListener('install', () => self.skipWaiting())
+self.addEventListener('activate', () => self.clients.claim())
+self.addEventListener('fetch', event => {
+  event.respondWith(fetch(event.request).catch(() => caches.match(event.request)))
+})
