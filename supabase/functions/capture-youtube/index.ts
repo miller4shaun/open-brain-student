@@ -176,4 +176,103 @@ async function fromInnertube(videoId: string): Promise<VideoContent | null> {
     // ROUTE 3 - no captions anywhere. Use the description.
     const details = best?.videoDetails
     const description: string = details?.shortDescription ?? ''
-    const keywords: string = (details?.keywords as string[] | undefined)?.join(',
+    const keywords: string = (details?.keywords as string[] | undefined)?.join(', ') ?? ''
+    if (description || keywords) {
+      const content = [description, keywords ? `Keywords: ${keywords}` : '']
+        .filter(Boolean).join('\n\n')
+      console.log(`[youtube] Falling back to description - ${description.length} chars`)
+      return { content, hasTranscript: false, source: 'description' }
+    }
+    return null
+  } catch (err) {
+    console.error('[youtube] Innertube parse error:', String(err))
+    return null
+  }
+}
+
+Deno.serve(async (req) => {
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
+
+  try {
+    const authHeader = req.headers.get('Authorization') ?? ''
+    const userClient = createClient(SUPABASE_URL, ANON_KEY, {
+      global: { headers: { Authorization: authHeader } },
+    })
+    const { data: { user }, error: authError } = await userClient.auth.getUser()
+    if (authError || !user) {
+      return jsonResponse({ ok: false, error: 'Not signed in' }, 401)
+    }
+
+    const { url } = await req.json()
+    if (!url || typeof url !== 'string') {
+      return jsonResponse({ ok: false, error: 'A YouTube url is required' }, 400)
+    }
+
+    const videoId = extractVideoId(url)
+    if (!videoId) {
+      return jsonResponse({ ok: false, error: 'That does not look like a YouTube link' }, 400)
+    }
+    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`
+
+    const title = await fetchTitle(videoUrl, videoId)
+    const result = (await fromSupadata(videoUrl)) ?? (await fromInnertube(videoId))
+
+    if (!result || !result.content) {
+      return jsonResponse({
+        ok: false,
+        error: 'Could not get anything for that video - no captions and no description.',
+      }, 422)
+    }
+
+    const label = result.hasTranscript
+      ? ''
+      : '(No captions were available - this is the video description, not what was said.)\n\n'
+
+    const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY)
+
+    const { data: thought, error: insertError } = await admin
+      .from('thoughts')
+      .insert({
+        user_id: user.id,
+        content: `\u{1F4F9} ${title}\n${videoUrl}\n\n${label}${result.content.slice(0, 8000)}`,
+        metadata: {
+          capture: 'youtube',
+          title,
+          video_id: videoId,
+          video_url: videoUrl,
+          has_transcript: result.hasTranscript,
+          fetched_via: result.source,
+        },
+      })
+      .select('id')
+      .single()
+
+    if (insertError || !thought) {
+      return jsonResponse({ ok: false, error: insertError?.message ?? 'Could not save' }, 500)
+    }
+
+    try {
+      await admin.from('thought_sources').insert({
+        thought_id: thought.id,
+        user_id: user.id,
+        source_text: result.content,
+        source_kind: result.hasTranscript ? 'youtube_transcript' : 'youtube_description',
+        char_count: result.content.length,
+        truncated: false,
+      })
+    } catch (e) {
+      console.warn('thought_sources insert failed:', String(e))
+    }
+
+    return jsonResponse({
+      ok: true,
+      title,
+      hasTranscript: result.hasTranscript,
+      via: result.source,
+      chars: result.content.length,
+    })
+  } catch (e) {
+    console.error('capture-youtube error:', String(e))
+    return jsonResponse({ ok: false, error: String(e) }, 500)
+  }
+})
