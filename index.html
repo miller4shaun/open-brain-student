@@ -167,6 +167,17 @@
     .yt-preview img { width: 120px; border-radius: 8px; flex-shrink: 0; }
     .yt-title { font-size: 0.875rem; color: var(--text); line-height: 1.45; }
 
+    /* ---------- manual fallback ---------- */
+    details.fallback { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
+    details.fallback > summary {
+      cursor: pointer; font-size: 0.8rem; color: var(--dim);
+      list-style: none; user-select: none;
+    }
+    details.fallback > summary::-webkit-details-marker { display: none; }
+    details.fallback > summary::before { content: '▸ '; }
+    details.fallback[open] > summary::before { content: '▾ '; }
+    details.fallback > summary:hover { color: var(--text); }
+
     /* ---------- thoughts ---------- */
     .thought {
       background: var(--card); border: 1px solid var(--line);
@@ -272,10 +283,7 @@
   <section class="panel" id="panel-youtube">
     <div class="card">
       <div class="hint">
-        Paste a video link, then open its transcript on YouTube, copy it, and
-        paste it below. YouTube hides subtitles from anything that isn't a
-        person with a browser, so this step is manual today &mdash; Level 3
-        gives you a server that can do it for you.
+        Paste a link and your server fetches the transcript itself. No copying.
       </div>
       <label for="ytUrl">YouTube link</label>
       <input type="text" id="ytUrl" placeholder="https://www.youtube.com/watch?v=...">
@@ -284,18 +292,23 @@
         <div class="yt-title" id="ytTitle"></div>
       </div>
       <div class="row">
-        <button class="ghost" id="ytOpen" disabled>Open transcript on YouTube</button>
-      </div>
-      <div class="hint" style="margin:16px 0 8px">
-        On YouTube: click <strong>...more</strong> under the video, then
-        <strong>Show transcript</strong>. Select the transcript text, copy it,
-        and paste it here.
-      </div>
-      <textarea id="ytText" placeholder="Paste the transcript here..."></textarea>
-      <div class="row">
-        <button id="ytSave">Save to Brain</button>
+        <button id="ytAuto" disabled>Capture transcript</button>
+        <button class="ghost" id="ytOpen" disabled>Watch on YouTube</button>
         <span class="msg" id="ytMsg"></span>
       </div>
+
+      <details class="fallback">
+        <summary>Paste a transcript by hand instead</summary>
+        <div class="hint" style="margin:12px 0 8px">
+          Useful when a video has no captions at all. On YouTube: click
+          <strong>...more</strong> under the video, then <strong>Show
+          transcript</strong>, then copy it.
+        </div>
+        <textarea id="ytText" placeholder="Paste the transcript here..."></textarea>
+        <div class="row">
+          <button id="ytSave">Save to Brain</button>
+        </div>
+      </details>
     </div>
   </section>
 
@@ -324,18 +337,26 @@
   <section class="panel" id="panel-url">
     <div class="card">
       <div class="hint">
-        Browsers forbid a web page from fetching content off another website
-        &mdash; a real security rule, not a bug. So paste the article text
-        yourself for now. Level 3 gives you a server that can go and get it.
+        Paste a link and your server goes and reads the page for you.
       </div>
       <label for="urlLink">Article URL</label>
       <input type="text" id="urlLink" placeholder="https://example.com/article">
-      <label for="urlText">Article text</label>
-      <textarea id="urlText" placeholder="Paste the article text here..."></textarea>
       <div class="row">
-        <button id="urlSave">Save to Brain</button>
+        <button id="urlAuto">Fetch and save</button>
         <span class="msg" id="urlMsg"></span>
       </div>
+
+      <details class="fallback">
+        <summary>Paste the text by hand instead</summary>
+        <div class="hint" style="margin:12px 0 8px">
+          Needed for pages behind a login, or ones that build themselves with
+          JavaScript after loading &mdash; a server cannot see those.
+        </div>
+        <textarea id="urlText" placeholder="Paste the article text here..."></textarea>
+        <div class="row">
+          <button id="urlSave">Save to Brain</button>
+        </div>
+      </details>
     </div>
   </section>
 
@@ -684,6 +705,7 @@ $('ytUrl').addEventListener('input', async function () {
   ytVideoTitle = ''
   $('ytPreview').style.display = 'none'
   $('ytOpen').disabled = !id
+  $('ytAuto').disabled = !id
   if (!id) { setMsg('ytMsg', ''); return }
 
   setMsg('ytMsg', 'Looking up video...')
@@ -708,6 +730,70 @@ $('ytUrl').addEventListener('input', async function () {
 $('ytOpen').addEventListener('click', function () {
   if (!ytVideoId) return
   window.open('https://www.youtube.com/watch?v=' + ytVideoId, '_blank', 'noopener')
+})
+
+// Ask one of your own edge functions to do the work. supabase-js attaches
+// your login token automatically, which is how the function knows who you are
+// and whose brain to write into.
+async function callFunction(name, body) {
+  const { data, error } = await db.functions.invoke(name, { body: body })
+  if (error) {
+    // A non-2xx reply lands here. The useful message is inside the response
+    // body, not in error.message, so dig it out.
+    let msg = error.message
+    try {
+      const detail = await error.context.json()
+      if (detail && detail.error) msg = detail.error
+    } catch (e) { /* keep the generic message */ }
+    throw new Error(msg)
+  }
+  if (data && data.ok === false) throw new Error(data.error || 'Failed')
+  return data
+}
+
+$('ytAuto').addEventListener('click', async function () {
+  if (!ytVideoId) return
+  const btn = $('ytAuto')
+  btn.disabled = true
+  setMsg('ytMsg', 'Fetching transcript... this can take 20 seconds')
+  try {
+    const res = await callFunction('capture-youtube', {
+      url: 'https://www.youtube.com/watch?v=' + ytVideoId,
+    })
+    const note = res.hasTranscript
+      ? '✓ Saved the transcript'
+      : '✓ Saved — but no captions existed, so this is the description'
+    setMsg('ytMsg', note + ' (' + res.chars.toLocaleString() + ' chars via ' + res.via + ')',
+           res.hasTranscript ? 'ok' : '')
+    $('ytUrl').value = ''
+    $('ytPreview').style.display = 'none'
+    $('ytOpen').disabled = true
+    ytVideoId = null
+    ytVideoTitle = ''
+    loadRecent()
+  } catch (e) {
+    setMsg('ytMsg', '✗ ' + e.message, 'err')
+    btn.disabled = false
+  }
+})
+
+$('urlAuto').addEventListener('click', async function () {
+  const link = $('urlLink').value.trim()
+  if (!link) { setMsg('urlMsg', 'Paste a link first.', 'err'); return }
+  const btn = $('urlAuto')
+  btn.disabled = true
+  setMsg('urlMsg', 'Fetching the page...')
+  try {
+    const res = await callFunction('capture-url', { url: link })
+    setMsg('urlMsg', '✓ Saved "' + res.title + '" (' +
+                     res.chars.toLocaleString() + ' chars)', 'ok')
+    $('urlLink').value = ''
+    loadRecent()
+  } catch (e) {
+    setMsg('urlMsg', '✗ ' + e.message, 'err')
+  } finally {
+    btn.disabled = false
+  }
 })
 
 $('ytSave').addEventListener('click', async function () {
