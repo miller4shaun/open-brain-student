@@ -49,6 +49,20 @@ const TOOLS = [
     },
   },
   {
+    name: 'get_thought',
+    description:
+      'Fetch one item from the brain in full, by its id. Use this after ' +
+      'search_thoughts or list_recent when a preview looks relevant and you ' +
+      'need the whole text.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The id shown in a search result' },
+      },
+      required: ['id'],
+    },
+  },
+  {
     name: 'add_thought',
     description:
       "Save a new thought into the user's brain. Use this when they ask you " +
@@ -84,6 +98,23 @@ function fmt(iso: string) {
   return new Date(iso).toISOString().slice(0, 10)
 }
 
+// Search returns excerpts, not whole documents. A single PDF or transcript can
+// run to 78,000 characters - ten of those would bury any AI. Show enough to
+// judge relevance, report the true size, and let get_thought fetch the rest.
+const PREVIEW_CHARS = 500
+
+function preview(content: string) {
+  const flat = content.replace(/\s+/g, ' ').trim()
+  if (flat.length <= PREVIEW_CHARS) return flat
+  return flat.slice(0, PREVIEW_CHARS) + '...'
+}
+
+function summarise(t: any, i: number) {
+  const size = String(t.content ?? '').length
+  return `[${i + 1}] ${fmt(t.created_at)} | ${size.toLocaleString()} chars | id ${t.id}\n` +
+         preview(String(t.content ?? ''))
+}
+
 async function searchThoughts(query: string) {
   const { data, error } = await db
     .from('thoughts')
@@ -95,7 +126,7 @@ async function searchThoughts(query: string) {
   if (error) throw new Error(error.message)
   if (!data || data.length === 0) return `No thoughts found matching "${query}".`
   return data
-    .map((t: any, i: number) => `[${i + 1}] ${fmt(t.created_at)} (id ${t.id})\n${t.content}`)
+    .map(summarise)
     .join('\n\n---\n\n')
 }
 
@@ -110,8 +141,20 @@ async function listRecent(limit: number) {
   if (error) throw new Error(error.message)
   if (!data || data.length === 0) return 'The brain is empty.'
   return data
-    .map((t: any, i: number) => `[${i + 1}] ${fmt(t.created_at)} (id ${t.id})\n${t.content}`)
+    .map(summarise)
     .join('\n\n---\n\n')
+}
+
+async function getThought(id: string) {
+  const { data, error } = await db
+    .from('thoughts')
+    .select('id, content, created_at, metadata')
+    .eq('user_id', OWNER_USER_ID)
+    .eq('id', id)
+    .maybeSingle()
+  if (error) throw new Error(error.message)
+  if (!data) return `No thought with id ${id}.`
+  return `${fmt(data.created_at)} | id ${data.id}\n\n${data.content}`
 }
 
 async function addThought(content: string) {
@@ -178,6 +221,10 @@ Deno.serve(async (req: Request) => {
         }
         if (name === 'list_recent') {
           return textResult(id, await listRecent(Number(args.limit ?? 10)))
+        }
+        if (name === 'get_thought') {
+          if (!args.id) return textResult(id, 'An id is required.', true)
+          return textResult(id, await getThought(String(args.id)))
         }
         if (name === 'add_thought') {
           if (!args.content) return textResult(id, 'Content is required.', true)
