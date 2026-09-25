@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>My Open Brain — Graph</title>
+  <meta name="theme-color" content="#6366f1">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="config.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { --bg:#0f0f0f; --card:#161616; --line:#222; --accent:#6366f1; --text:#e5e5e5; --dim:#6b6b6b; }
+    html, body { height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg); color: var(--text); overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+    canvas { display: block; cursor: grab; }
+    canvas.dragging { cursor: grabbing; }
+
+    .panel {
+      position: fixed; z-index: 10; background: rgba(22,22,22,0.94);
+      border: 1px solid var(--line); border-radius: 12px; backdrop-filter: blur(8px);
+    }
+    #head {
+      top: calc(12px + env(safe-area-inset-top, 0px)); left: 12px;
+      padding: 12px 16px; max-width: calc(100vw - 24px);
+    }
+    #head h1 { font-size: 1rem; font-weight: 600; color: #fff; }
+    #stats { font-size: 0.75rem; color: var(--dim); margin-top: 4px; }
+    #head a { color: var(--accent); text-decoration: none; font-size: 0.75rem; }
+
+    #legend {
+      bottom: calc(12px + env(safe-area-inset-bottom, 0px)); left: 12px;
+      padding: 10px 14px; font-size: 0.7rem; line-height: 1.9;
+    }
+    .key { display: flex; align-items: center; gap: 7px; color: var(--dim); }
+    .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+
+    #detail {
+      top: calc(12px + env(safe-area-inset-top, 0px)); right: 12px;
+      width: min(360px, calc(100vw - 24px)); max-height: 70vh; overflow-y: auto;
+      padding: 16px 18px; display: none;
+    }
+    #detail .cat {
+      font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.09em;
+      color: var(--accent); margin-bottom: 8px;
+    }
+    #detail .body { font-size: 0.82rem; line-height: 1.6; white-space: pre-wrap; word-wrap: break-word; }
+    #detail .meta { font-size: 0.7rem; color: #4a4a4a; margin-top: 10px; }
+    #detail .tags { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 5px; }
+    #detail .tag {
+      font-size: 0.65rem; background: #1e1e2a; border: 1px solid #2a2a3a;
+      color: #9a9ab5; border-radius: 999px; padding: 2px 8px;
+    }
+    #detail .close {
+      float: right; background: none; border: none; color: var(--dim);
+      cursor: pointer; font-size: 1.1rem; line-height: 1; margin: -4px -4px 0 0;
+    }
+
+    #gate { display: grid; place-items: center; height: 100%; padding: 24px; }
+    #gate .box {
+      background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+      padding: 24px; width: min(380px, 100%);
+    }
+    #gate h1 { font-size: 1.1rem; margin-bottom: 6px; color: #fff; }
+    #gate p { font-size: 0.85rem; color: var(--dim); line-height: 1.6; margin-bottom: 18px; }
+    input {
+      width: 100%; background: var(--bg); border: 1px solid #252525; border-radius: 8px;
+      color: var(--text); font-size: 0.95rem; padding: 11px 13px; margin-bottom: 12px;
+      font-family: inherit; outline: none;
+    }
+    input:focus { border-color: var(--accent); }
+    button.primary {
+      width: 100%; background: var(--accent); color: #fff; border: none; border-radius: 8px;
+      padding: 11px; font-size: 0.9rem; cursor: pointer; font-family: inherit;
+    }
+    .msg { font-size: 0.78rem; color: #ef4444; margin-top: 10px; min-height: 1em; }
+  </style>
+</head>
+<body>
+
+<div id="gate">
+  <div class="box">
+    <h1>Your brain, as a map</h1>
+    <p>Sign in with the same account you use for the app.</p>
+    <input type="email" id="email" placeholder="you@example.com" autocomplete="email">
+    <input type="password" id="pass" placeholder="Password" autocomplete="current-password">
+    <button class="primary" id="signIn">Sign in</button>
+    <div class="msg" id="gateMsg"></div>
+  </div>
+</div>
+
+<canvas id="cv" style="display:none"></canvas>
+
+<div class="panel" id="head" style="display:none">
+  <h1>My Open Brain</h1>
+  <div id="stats"></div>
+  <a href="./">&larr; back to the app</a>
+</div>
+
+<div class="panel" id="legend" style="display:none"></div>
+
+<div class="panel" id="detail">
+  <button class="close" id="closeDetail">&times;</button>
+  <div class="cat" id="dCat"></div>
+  <div class="body" id="dBody"></div>
+  <div class="tags" id="dTags"></div>
+  <div class="meta" id="dMeta"></div>
+</div>
+
+<script>
+'use strict'
+
+// Colour by category, so clusters are readable at a glance rather than being
+// an undifferentiated hairball.
+const COLORS = {
+  idea:       '#6366f1',
+  learning:   '#22c55e',
+  question:   '#eab308',
+  reference:  '#38bdf8',
+  plan:       '#f472b6',
+  reflection: '#a78bfa',
+  digest:     '#f97316',
+  other:      '#555555',
+}
+
+const $ = (id) => document.getElementById(id)
+let db, nodes = [], links = [], hover = null, selected = null
+
+/* ---------------- data ---------------- */
+
+async function load() {
+  const [{ data: thoughts, error: tErr }, { data: edges, error: lErr }] = await Promise.all([
+    db.from('thoughts').select('id, content, summary, category, tags, created_at'),
+    db.from('thought_links').select('source_thought_id, target_thought_id, similarity_score'),
+  ])
+  if (tErr) throw new Error(tErr.message)
+  if (lErr) throw new Error(lErr.message)
+
+  const byId = new Map()
+  nodes = (thoughts || []).map((t) => {
+    const n = {
+      id: t.id,
+      label: (t.summary || String(t.content || '')).replace(/\s+/g, ' ').trim().slice(0, 90),
+      content: String(t.content || ''),
+      category: t.category || 'other',
+      tags: Array.isArray(t.tags) ? t.tags : [],
+      created_at: t.created_at,
+      size: String(t.content || '').length,
+      degree: 0,
+      // Start scattered rather than all at the centre, or the first frames are
+      // one solid blob that takes ages to separate.
+      x: (Math.random() - 0.5) * 600,
+      y: (Math.random() - 0.5) * 600,
+      vx: 0, vy: 0,
+    }
+    byId.set(t.id, n)
+    return n
+  })
+
+  links = (edges || [])
+    .map((e) => ({
+      a: byId.get(e.source_thought_id),
+      b: byId.get(e.target_thought_id),
+      w: e.similarity_score || 0.5,
+    }))
+    .filter((l) => l.a && l.b)
+
+  for (const l of links) { l.a.degree++; l.b.degree++ }
+
+  const linked = nodes.filter((n) => n.degree > 0).length
+  $('stats').textContent =
+    `${nodes.length} thoughts · ${links.length} connections · ${linked} connected`
+
+  const used = [...new Set(nodes.map((n) => n.category))].sort()
+  $('legend').innerHTML = used.map((c) =>
+    `<div class="key"><span class="dot" style="background:${COLORS[c] || COLORS.other}"></span>${c}</div>`
+  ).join('')
+}
+
+/* ---------------- layout ---------------- */
+// A small force simulation: linked nodes pull together, every node pushes
+// every other apart, and a weak pull toward the centre stops the whole thing
+// drifting off screen. Three rules, and structure falls out of them.
+
+function step() {
+  const REPEL = 9000, SPRING = 0.006, CENTER = 0.0015, DAMP = 0.86
+
+  for (let i = 0; i < nodes.length; i++) {
+    const a = nodes[i]
+    for (let j = i + 1; j < nodes.length; j++) {
+      const b = nodes[j]
+      let dx = b.x - a.x, dy = b.y - a.y
+      let d2 = dx * dx + dy * dy
+      if (d2 < 1) { d2 = 1; dx = Math.random() - 0.5; dy = Math.random() - 0.5 }
+      const f = REPEL / d2
+      const d = Math.sqrt(d2)
+      a.vx -= (dx / d) * f; a.vy -= (dy / d) * f
+      b.vx += (dx / d) * f; b.vy += (dy / d) * f
+    }
+  }
+
+  for (const l of links) {
+    const dx = l.b.x - l.a.x, dy = l.b.y - l.a.y
+    const d = Math.sqrt(dx * dx + dy * dy) || 1
+    // Stronger similarity pulls harder, so the graph's geometry actually
+    // reflects the numbers rather than just the presence of an edge.
+    const target = 120 - l.w * 60
+    const f = (d - target) * SPRING * l.w
+    l.a.vx += (dx / d) * f; l.a.vy += (dy / d) * f
+    l.b.vx -= (dx / d) * f; l.b.vy -= (dy / d) * f
+  }
+
+  for (const n of nodes) {
+    n.vx -= n.x * CENTER; n.vy -= n.y * CENTER
+    n.vx *= DAMP; n.vy *= DAMP
+    if (n !== dragNode) { n.x += n.vx; n.y += n.vy }
+  }
+}
+
+/* ---------------- drawing ---------------- */
+
+const cv = $('cv'), ctx = cv.getContext('2d')
+let scale = 1, panX = 0, panY = 0, dragNode = null, panning = false, last = null
+
+function radius(n) {
+  return 4 + Math.min(9, Math.sqrt(n.degree) * 3)
+}
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1
+  cv.width = innerWidth * dpr
+  cv.height = innerHeight * dpr
+  cv.style.width = innerWidth + 'px'
+  cv.style.height = innerHeight + 'px'
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+}
+
+function toScreen(n) {
+  return { x: n.x * scale + panX + innerWidth / 2, y: n.y * scale + panY + innerHeight / 2 }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, innerWidth, innerHeight)
+
+  const active = selected || hover
+  const near = new Set()
+  if (active) {
+    near.add(active.id)
+    for (const l of links) {
+      if (l.a === active) near.add(l.b.id)
+      if (l.b === active) near.add(l.a.id)
+    }
+  }
+
+  for (const l of links) {
+    const p = toScreen(l.a), q = toScreen(l.b)
+    const lit = active && (l.a === active || l.b === active)
+    ctx.strokeStyle = lit ? 'rgba(99,102,241,0.85)' : `rgba(255,255,255,${0.05 + l.w * 0.10})`
+    ctx.lineWidth = lit ? 1.8 : 0.7
+    ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); ctx.stroke()
+  }
+
+  for (const n of nodes) {
+    const p = toScreen(n)
+    const r = radius(n) * Math.max(0.6, Math.min(1.6, scale))
+    const dim = active && !near.has(n.id)
+    ctx.globalAlpha = dim ? 0.18 : 1
+    ctx.fillStyle = COLORS[n.category] || COLORS.other
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill()
+    if (n === active) {
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2
+      ctx.beginPath(); ctx.arc(p.x, p.y, r + 3, 0, Math.PI * 2); ctx.stroke()
+    }
+    ctx.globalAlpha = 1
+  }
+
+  // Labels only when zoomed in or highlighted — at full view they overlap into
+  // noise and hide the shape you came to see.
+  if (scale > 1.25 || active) {
+    ctx.font = '11px -apple-system, sans-serif'
+    ctx.textAlign = 'center'
+    for (const n of nodes) {
+      if (active && !near.has(n.id)) continue
+      if (!active && n.degree === 0 && scale < 1.8) continue
+      const p = toScreen(n)
+      ctx.fillStyle = n === active ? '#fff' : 'rgba(229,229,229,0.75)'
+      ctx.fillText(n.label.slice(0, 40), p.x, p.y - radius(n) - 6)
+    }
+  }
+}
+
+function frame() { step(); draw(); requestAnimationFrame(frame) }
+
+/* ---------------- interaction ---------------- */
+
+function pick(mx, my) {
+  let best = null, bestD = 18
+  for (const n of nodes) {
+    const p = toScreen(n)
+    const d = Math.hypot(p.x - mx, p.y - my)
+    if (d < bestD) { bestD = d; best = n }
+  }
+  return best
+}
+
+function showDetail(n) {
+  selected = n
+  if (!n) { $('detail').style.display = 'none'; return }
+  $('dCat').textContent = n.category + ' · ' + n.degree + ' connection' + (n.degree === 1 ? '' : 's')
+  $('dBody').textContent = n.content.slice(0, 1200) + (n.content.length > 1200 ? '…' : '')
+  $('dTags').innerHTML = n.tags.map((t) => `<span class="tag">${t}</span>`).join('')
+  $('dMeta').textContent =
+    new Date(n.created_at).toLocaleDateString() + ' · ' + n.size.toLocaleString() + ' chars'
+  $('detail').style.display = 'block'
+}
+
+cv.addEventListener('mousedown', (e) => {
+  const n = pick(e.clientX, e.clientY)
+  if (n) { dragNode = n; showDetail(n) }
+  else { panning = true; cv.classList.add('dragging') }
+  last = { x: e.clientX, y: e.clientY }
+})
+addEventListener('mousemove', (e) => {
+  if (dragNode) {
+    dragNode.x += (e.clientX - last.x) / scale
+    dragNode.y += (e.clientY - last.y) / scale
+  } else if (panning) {
+    panX += e.clientX - last.x; panY += e.clientY - last.y
+  } else {
+    hover = pick(e.clientX, e.clientY)
+  }
+  last = { x: e.clientX, y: e.clientY }
+})
+addEventListener('mouseup', () => { dragNode = null; panning = false; cv.classList.remove('dragging') })
+
+cv.addEventListener('wheel', (e) => {
+  e.preventDefault()
+  const k = e.deltaY < 0 ? 1.1 : 0.9
+  scale = Math.max(0.25, Math.min(5, scale * k))
+}, { passive: false })
+
+$('closeDetail').addEventListener('click', () => showDetail(null))
+addEventListener('resize', resize)
+
+/* ---------------- startup ---------------- */
+
+async function start() {
+  $('gate').style.display = 'none'
+  cv.style.display = 'block'
+  $('head').style.display = 'block'
+  $('legend').style.display = 'block'
+  resize()
+  await load()
+  frame()
+}
+
+async function signIn() {
+  const msg = $('gateMsg')
+  msg.textContent = ''
+  try {
+    const { error } = await db.auth.signInWithPassword({
+      email: $('email').value.trim(),
+      password: $('pass').value,
+    })
+    if (error) throw error
+  } catch (e) {
+    msg.textContent = e.message
+  }
+}
+
+function init() {
+  if (typeof SUPABASE_URL === 'undefined') {
+    document.body.innerHTML = '<p style="padding:24px">config.js is missing.</p>'
+    return
+  }
+  db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  $('signIn').addEventListener('click', signIn)
+  $('pass').addEventListener('keydown', (e) => { if (e.key === 'Enter') signIn() })
+
+  db.auth.onAuthStateChange((_e, session) => { if (session) start() })
+  db.auth.getSession().then(({ data }) => { if (data && data.session) start() })
+}
+
+init()
+</script>
+</body>
+</html>
