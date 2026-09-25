@@ -186,6 +186,10 @@
     .thought-text { font-size: 0.9rem; line-height: 1.6; white-space: pre-wrap; word-wrap: break-word; }
     .thought-time { font-size: 0.72rem; color: #4a4a4a; margin-top: 8px; }
     .empty { color: #3d3d3d; font-size: 0.875rem; text-align: center; padding: 34px 0; }
+    .chunk-note {
+      font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.07em;
+      color: var(--accent); margin-bottom: 8px;
+    }
     .section-label {
       font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.09em;
       color: #444; margin-bottom: 12px;
@@ -953,26 +957,47 @@ $('urlSave').addEventListener('click', async function () {
    Search
    ============================================================ */
 
+// Search now goes through the search-brain edge function, which fuses
+// meaning-based and keyword ranking. It cannot run in the browser: generating
+// an embedding of the query needs an API key that must never reach a web page.
 async function runSearch() {
   const q = $('searchBox').value.trim()
   const box = $('searchResults')
   if (!q) { box.innerHTML = ''; setMsg('searchMsg', ''); return }
   setMsg('searchMsg', 'Searching...')
   try {
-    const { data, error } = await db
-      .from('thoughts')
-      .select('*')
-      .ilike('content', '%' + q + '%')
-      .order('created_at', { ascending: false })
-      .limit(50)
-    if (error) throw error
-    setMsg('searchMsg', data.length + ' result' + (data.length === 1 ? '' : 's'))
-    box.innerHTML = data.length
-      ? renderThoughts(data)
+    const res = await callFunction('search-brain', { query: q, limit: 20 })
+    const rows = res.results || []
+    setMsg('searchMsg',
+      rows.length + ' result' + (rows.length === 1 ? '' : 's') +
+      (res.semantic ? '' : ' (keyword only \u2014 meaning search unavailable)'))
+    box.innerHTML = rows.length
+      ? renderResults(rows)
       : '<div class="empty">Nothing matched "' + esc(q) + '".</div>'
   } catch (e) {
-    setMsg('searchMsg', '✗ ' + e.message, 'err')
+    setMsg('searchMsg', '\u2717 ' + e.message, 'err')
   }
+}
+
+// A result may have matched on a passage buried inside a long capture. Show
+// that passage, not the document's opening lines - otherwise the reason this
+// result is here is invisible.
+function renderResults(rows) {
+  return rows.map(function (t) {
+    const pct = Math.round((t.similarity || 0) * 100)
+    const fromChunk = t.match_source === 'chunk' && t.matched_chunk
+    const body = fromChunk
+      ? String(t.matched_chunk).replace(/\s+/g, ' ').trim().slice(0, 900)
+      : (t.content.length > 1200 ? t.content.slice(0, 1200) + '\u2026' : t.content)
+    return '<div class="thought">' +
+             (fromChunk
+               ? '<div class="chunk-note">matched partway through a longer capture</div>'
+               : '') +
+             '<div class="thought-text">' + esc(body) + '</div>' +
+             '<div class="thought-time">' + fmt(t.created_at) +
+               (pct ? ' \u00b7 ' + pct + '% match' : '') + '</div>' +
+           '</div>'
+  }).join('')
 }
 
 $('searchBtn').addEventListener('click', runSearch)

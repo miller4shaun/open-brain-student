@@ -171,38 +171,36 @@ async function connectedTo(ids: string[]) {
 async function searchThoughts(query: string) {
   const embedding = await embedQuery(query)
 
-  // Degrade to keyword matching rather than break, if embedding is down.
-  if (!embedding) {
-    const { data, error } = await db
-      .from('thoughts')
-      .select('id, content, created_at')
-      .eq('user_id', OWNER_USER_ID)
-      .ilike('content', `%${query}%`)
-      .order('created_at', { ascending: false })
-      .limit(10)
-    if (error) throw new Error(error.message)
-    if (!data || data.length === 0) return `No thoughts found matching "${query}".`
-    return '(keyword search - meaning-based search was unavailable)\n\n' +
-           data.map(summarise).join('\n\n---\n\n')
-  }
-
+  // Hybrid: the query TEXT drives keyword ranking, the embedding drives
+  // meaning ranking, and the database fuses the two. Passing query_embedding
+  // as null is a valid fallback - keyword-only still works.
   const { data, error } = await db.rpc('search_thoughts', {
-    query_embedding: embedding,
+    query_text: query,
     p_user_id: OWNER_USER_ID,
+    query_embedding: embedding,
     match_threshold: 0.3,
     match_count: 10,
+    max_per_document: 2,
   })
   if (error) throw new Error(error.message)
   if (!data || data.length === 0) {
-    return `Nothing in the brain is close in meaning to "${query}".`
+    return `Nothing in the brain matches "${query}" by meaning or by keyword.`
   }
 
   const main = data
     .map((t: any, i: number) => {
       const size = String(t.content ?? '').length
       const pct = Math.round((t.similarity ?? 0) * 100)
-      return `[${i + 1}] ${fmt(t.created_at)} | ${pct}% match | ${size.toLocaleString()} chars | id ${t.id}\n` +
-             preview(String(t.content ?? ''))
+      const header = `[${i + 1}] ${fmt(t.created_at)} | ${pct}% match | ${size.toLocaleString()} chars | id ${t.id}`
+
+      // When the match came from inside a long document, show the passage that
+      // actually matched rather than the document's opening lines - otherwise
+      // the reason this result is here is invisible.
+      if (t.match_source === 'chunk' && t.matched_chunk) {
+        return header + '\n(matched partway through a longer capture)\n' +
+               String(t.matched_chunk).replace(/\s+/g, ' ').trim().slice(0, 700)
+      }
+      return header + '\n' + preview(String(t.content ?? ''))
     })
     .join('\n\n---\n\n')
 

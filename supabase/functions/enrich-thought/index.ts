@@ -1,4 +1,14 @@
+// Runs on every thought insert, via the enrich_on_insert trigger.
+// Three jobs, in order, each safe to fail on its own:
+//   1. tags, category, summary        (needs call-llm)
+//   2. an embedding of its meaning    (needs generate-embedding)
+//   3. links to its nearest neighbours (needs the embedding)
+//
+// Always returns 200. A webhook that errors gets retried, and a retry would
+// spend money re-processing a thought that is already fine.
+
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { saveThoughtChunksSafe } from '../_shared/thought-chunks.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
@@ -6,9 +16,13 @@ const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 const db = createClient(SUPABASE_URL, SERVICE_ROLE_KEY)
 
 const CATEGORIES = ['idea', 'learning', 'question', 'reference', 'plan', 'reflection']
+
+// A captured PDF or transcript can run to 78,000 characters. Sending all of it
+// to be tagged would cost real money for no extra accuracy.
 const MAX_CHARS = 6000
 
-// Stricter than the 0.3 used for search: search wants candidates, a link is a
+// Similarity above which two thoughts get a permanent link. 0.5 is deliberately
+// stricter than the 0.3 used for search: search wants candidates, a link is a
 // claim that two things belong together.
 const LINK_THRESHOLD = 0.5
 const MAX_LINKS = 5
@@ -24,6 +38,7 @@ function internalHeaders() {
   }
 }
 
+// Models sometimes wrap JSON in markdown fences or add a sentence first.
 function parseJson(text: string): any | null {
   try {
     const start = text.indexOf('{')
@@ -148,7 +163,7 @@ async function linkNeighbours(thoughtId: string, userId: string, embedding: numb
   }
 }
 
-Deno.serve(async (req) => {
+Deno.serve(async (req: Request) => {
   try {
     const payload = await req.json()
     const record = payload?.record
@@ -167,13 +182,15 @@ Deno.serve(async (req) => {
       return ok()
     }
 
-    // In parallel - they do not depend on each other, and running them one
-    // after the other doubles how long this takes for no reason.
+    // Run both in parallel - they do not depend on each other, and doing them
+    // one after the other doubles how long this takes for no reason.
     const [enrichment, embedding] = await Promise.all([
       enrich(content, userId),
       embed(content),
     ])
 
+    // One update carrying whatever succeeded. If the AI failed but the
+    // embedding worked, the embedding still gets saved, and vice versa.
     const update: Record<string, unknown> = { enriched_at: new Date().toISOString() }
     if (enrichment) {
       update.tags = enrichment.tags
@@ -195,11 +212,19 @@ Deno.serve(async (req) => {
     let linked = 0
     if (embedding) linked = await linkNeighbours(thoughtId, userId, embedding)
 
+    // Cut long captures into pieces, each with its own embedding, so a detail
+    // buried in paragraph twelve is findable on its own terms. Never throws,
+    // and does nothing for content under 2,000 characters.
+    const chunkResult = await saveThoughtChunksSafe(
+      db, thoughtId, content, 'enrich-thought', 'summary',
+    )
+
     console.log(
       `enriched ${thoughtId}`,
       `category=${enrichment?.category ?? 'none'}`,
       `embedded=${embedding ? 'yes' : 'no'}`,
       `links=${linked}`,
+      `chunks=${chunkResult.chunked}`,
     )
 
     return ok()
