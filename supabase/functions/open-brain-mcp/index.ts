@@ -24,10 +24,13 @@ const TOOLS = [
   {
     name: 'search_thoughts',
     description:
-      "Search the user's personal knowledge base (their 'brain') for anything " +
-      'they have captured: notes, YouTube transcripts, PDF extracts, saved ' +
-      'articles, voice notes and messages. Use this whenever the user refers ' +
-      'to something they saved, read, watched, or wrote down.',
+      "Search the user's personal knowledge base (their 'brain') BY MEANING, " +
+      'not keywords. Finds relevant material even when the user phrases things ' +
+      'completely differently from how they wrote them. Covers notes, YouTube ' +
+      'transcripts, PDF extracts, saved articles and messages. Also returns ' +
+      'items connected to the results through the thought graph. Use this ' +
+      'whenever the user refers to something they saved, read, watched, or ' +
+      'wrote down.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -115,19 +118,102 @@ function summarise(t: any, i: number) {
          preview(String(t.content ?? ''))
 }
 
-async function searchThoughts(query: string) {
-  const { data, error } = await db
+// Turn the query into coordinates in meaning-space, so "how do I get new
+// clients" can find a note about customer acquisition that shares no words
+// with it.
+async function embedQuery(text: string): Promise<number[] | null> {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/generate-embedding`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+      },
+      body: JSON.stringify({ text }),
+    })
+    if (!res.ok) return null
+    const { embedding } = await res.json()
+    return Array.isArray(embedding) ? embedding : null
+  } catch {
+    return null
+  }
+}
+
+// Ideas the user forgot about, surfaced because they are wired to something
+// being asked about now.
+async function connectedTo(ids: string[]) {
+  if (ids.length === 0) return []
+  const list = ids.join(',')
+  const { data } = await db
+    .from('thought_links')
+    .select('source_thought_id, target_thought_id, similarity_score')
+    .or(`source_thought_id.in.(${list}),target_thought_id.in.(${list})`)
+    .order('similarity_score', { ascending: false })
+    .limit(20)
+  if (!data) return []
+
+  const seen = new Set(ids)
+  const neighbourIds: string[] = []
+  for (const l of data) {
+    for (const id of [l.source_thought_id, l.target_thought_id]) {
+      if (!seen.has(id)) { seen.add(id); neighbourIds.push(id) }
+    }
+  }
+  if (neighbourIds.length === 0) return []
+
+  const { data: rows } = await db
     .from('thoughts')
     .select('id, content, created_at')
-    .eq('user_id', OWNER_USER_ID)
-    .ilike('content', `%${query}%`)
-    .order('created_at', { ascending: false })
-    .limit(10)
+    .in('id', neighbourIds.slice(0, 5))
+  return rows ?? []
+}
+
+async function searchThoughts(query: string) {
+  const embedding = await embedQuery(query)
+
+  // Degrade to keyword matching rather than break, if embedding is down.
+  if (!embedding) {
+    const { data, error } = await db
+      .from('thoughts')
+      .select('id, content, created_at')
+      .eq('user_id', OWNER_USER_ID)
+      .ilike('content', `%${query}%`)
+      .order('created_at', { ascending: false })
+      .limit(10)
+    if (error) throw new Error(error.message)
+    if (!data || data.length === 0) return `No thoughts found matching "${query}".`
+    return '(keyword search - meaning-based search was unavailable)\n\n' +
+           data.map(summarise).join('\n\n---\n\n')
+  }
+
+  const { data, error } = await db.rpc('search_thoughts', {
+    query_embedding: embedding,
+    p_user_id: OWNER_USER_ID,
+    match_threshold: 0.3,
+    match_count: 10,
+  })
   if (error) throw new Error(error.message)
-  if (!data || data.length === 0) return `No thoughts found matching "${query}".`
-  return data
-    .map(summarise)
+  if (!data || data.length === 0) {
+    return `Nothing in the brain is close in meaning to "${query}".`
+  }
+
+  const main = data
+    .map((t: any, i: number) => {
+      const size = String(t.content ?? '').length
+      const pct = Math.round((t.similarity ?? 0) * 100)
+      return `[${i + 1}] ${fmt(t.created_at)} | ${pct}% match | ${size.toLocaleString()} chars | id ${t.id}\n` +
+             preview(String(t.content ?? ''))
+    })
     .join('\n\n---\n\n')
+
+  const neighbours = await connectedTo(data.map((t: any) => t.id))
+  if (neighbours.length === 0) return main
+
+  const also = neighbours
+    .map((t: any) => `- id ${t.id} | ${preview(String(t.content ?? '')).slice(0, 200)}`)
+    .join('\n')
+
+  return main + '\n\n=== ALSO CONNECTED (via the thought graph) ===\n' + also
 }
 
 async function listRecent(limit: number) {
